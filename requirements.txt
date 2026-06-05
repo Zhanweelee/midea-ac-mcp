@@ -1,0 +1,2 @@
+fastmcp>=1.0.0
+msmart-ng>=2026.4.0
