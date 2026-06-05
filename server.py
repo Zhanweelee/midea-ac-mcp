@@ -29,24 +29,61 @@ _LOGGER = logging.getLogger("midea-mcp")
 
 # ─── macOS UDP broadcast fix ──────────────────────────────────────────────
 # msmart-ng binds to 0.0.0.0 which fails on macOS (errno 49).
-# We wrap Discover.discover to create a pre-bound socket.
+# We patch Discover.discover to use subnet broadcast + pre-bound socket.
 
 _local_ip: Optional[str] = None
+_subnet_broadcast: Optional[str] = None
 
 
 def _get_local_ip() -> str:
     global _local_ip
     if _local_ip:
         return _local_ip
+    local_ip = os.environ.get("MIDEA_LOCAL_IP")
+    if local_ip:
+        _local_ip = local_ip
+        return _local_ip
+
+    try:
+        import fcntl
+        import struct
+        for name in sorted(socket.if_nameindex(), key=lambda x: x[0]):
+            iface = name[1]
+            if iface.startswith(("lo", "utun", "llw", "awdl", "bridge", "gif", "stf")):
+                continue
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                ip = socket.inet_ntoa(
+                    fcntl.ioctl(s.fileno(), 0xC0206921, struct.pack("256s", iface.encode()[:15]))[20:24]
+                )
+                s.close()
+                if ip and not ip.startswith("127."):
+                    _local_ip = ip
+                    return _local_ip
+            except Exception:
+                continue
+    except Exception:
+        pass
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.1)
-        s.connect(("8.8.8.8", 1))
+        s.connect(("1.1.1.1", 1))
         _local_ip = s.getsockname()[0]
         s.close()
         return _local_ip or "127.0.0.1"
     except Exception:
         return "127.0.0.1"
+
+
+def _get_subnet_broadcast() -> str:
+    global _subnet_broadcast
+    if _subnet_broadcast:
+        return _subnet_broadcast
+    local_ip = _get_local_ip()
+    parts = local_ip.rsplit(".", 1)
+    _subnet_broadcast = f"{parts[0]}.255" if len(parts) == 2 else "255.255.255.255"
+    return _subnet_broadcast
 
 
 # Patch Discover.discover to bind to LAN IP instead of 0.0.0.0
@@ -58,19 +95,21 @@ _orig_discover_classmethod = Discover.discover
 async def _patched_discover(
     cls,
     *,
-    target="255.255.255.255",
+    target=None,
     timeout=5,
     discovery_packets=3,
     interface=None,
     region="",
     account=None,
     password=None,
-    auto_connect=True,
+    auto_connect=False,
     get_async_client=None,
 ):
-    """Patched discover: creates a pre-bound socket to avoid macOS errno 49."""
+    """Patched discover: uses subnet broadcast + pre-bound socket to avoid macOS errno 49."""
 
-    # Initialize lock if needed (original behavior)
+    if target is None:
+        target = _get_subnet_broadcast()
+
     if cls._lock is None:
         cls._lock = asyncio.Lock()
 
@@ -84,7 +123,6 @@ async def _patched_discover(
     loop = asyncio.get_event_loop()
     local_ip = _get_local_ip()
 
-    # Create pre-bound socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.setblocking(False)
@@ -197,15 +235,19 @@ async def discover_devices() -> str:
 
         result = f"发现 {len(acs)} 台美的空调：\n\n"
         for i, ac in enumerate(acs, 1):
-            await ac.refresh()
+            try:
+                await ac.refresh()
+            except Exception:
+                pass
             mode_name = MODE_NAMES.get(ac.operational_mode, str(ac.operational_mode.name))
             fan_name = FAN_NAMES.get(ac.fan_speed, str(ac.fan_speed))
+            indoor = f"{ac.indoor_temperature}°C" if ac.indoor_temperature else "N/A"
             result += (
                 f"【{i}】IP: {ac.ip}\n"
                 f"  状态: {'🟢 开机' if ac.power_state else '⚫ 关机'}\n"
                 f"  模式: {mode_name}\n"
                 f"  目标温度: {ac.target_temperature}°C\n"
-                f"  室内温度: {ac.indoor_temperature}°C\n"
+                f"  室内温度: {indoor}\n"
                 f"  风速: {fan_name}\n\n"
             )
 
@@ -225,10 +267,15 @@ async def get_status(ip: Optional[str] = None) -> str:
     """
     try:
         ac = await _get_device(ip)
-        await ac.refresh()
+        try:
+            await ac.refresh()
+        except Exception:
+            pass
 
         mode_name = MODE_NAMES.get(ac.operational_mode, str(ac.operational_mode.name))
         fan_name = FAN_NAMES.get(ac.fan_speed, str(ac.fan_speed))
+        indoor = f"{ac.indoor_temperature}°C" if ac.indoor_temperature else "N/A"
+        outdoor = f"{ac.outdoor_temperature}°C" if ac.outdoor_temperature else "N/A"
 
         return (
             f"📊 美的空调状态\n"
@@ -237,8 +284,8 @@ async def get_status(ip: Optional[str] = None) -> str:
             f"运行状态: {'🟢 运行中' if ac.power_state else '⚫ 已关机'}\n"
             f"运行模式: {mode_name}\n"
             f"目标温度: {ac.target_temperature}°C\n"
-            f"室内温度: {ac.indoor_temperature}°C\n"
-            f"室外温度: {ac.outdoor_temperature or 'N/A'}°C\n"
+            f"室内温度: {indoor}\n"
+            f"室外温度: {outdoor}\n"
             f"风速: {fan_name}\n"
             f"支持模式: {', '.join(MODE_NAMES.get(m, str(m.name)) for m in ac.supported_operation_modes)}\n"
             f"温度范围: {ac.min_target_temperature}°C ~ {ac.max_target_temperature}°C"
