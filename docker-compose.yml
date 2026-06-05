@@ -6,6 +6,8 @@ services:
     container_name: midea-ac-mcp
     environment:
       - TZ=Asia/Shanghai
+      - HOST=0.0.0.0
+      - PORT=8000
     # 使用 host 网络模式以便发现局域网中的空调
     network_mode: host
     restart: unless-stopped

@@ -12,6 +12,7 @@ Usage:
 
 import asyncio
 import json
+import os
 import sys
 import socket
 import logging
@@ -122,8 +123,8 @@ Discover.discover = classmethod(_patched_discover)
 mcp = FastMCP(
     name="Midea AC Controller",
     instructions="控制美的（及同生态品牌）智能空调。支持扫描发现设备、查看状态、开关机、调温、调模式、调风速。",
-    host="0.0.0.0",
-    port=8000,
+    host=os.environ.get("HOST", "0.0.0.0"),
+    port=int(os.environ.get("PORT", "8000")),
 )
 
 # Global: cached device reference
