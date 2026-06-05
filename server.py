@@ -347,14 +347,33 @@ async def set_fan_speed(speed: str, ip: Optional[str] = None) -> str:
 # ─── Main ─────────────────────────────────────────────────────────────────
 
 def main():
-    if "--scan" in sys.argv:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Midea AC MCP Server")
+    parser.add_argument("--scan", action="store_true", help="扫描局域网发现美的空调设备")
+    parser.add_argument(
+        "--transport",
+        type=str,
+        choices=["stdio", "streamable-http"],
+        default="stdio",
+        help="MCP 传输协议 (默认 stdio, streamable-http 用于 Docker/远程访问)",
+    )
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="HTTP 监听地址 (默认 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="HTTP 监听端口 (默认 8000)")
+
+    args = parser.parse_args()
+
+    if args.scan:
         async def scan_only():
             result = await discover_devices()
             print(result)
         asyncio.run(scan_only())
         return
 
-    mcp.run(transport="stdio")
+    if args.transport == "streamable-http":
+        mcp.run(transport=args.transport, host=args.host, port=args.port)
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

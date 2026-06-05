@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  midea-ac-mcp:
+    build: .
+    container_name: midea-ac-mcp
+    ports:
+      - "8000:8000"
+    environment:
+      - TZ=Asia/Shanghai
+    # 使用 host 网络模式以便发现局域网中的空调
+    network_mode: host
+    restart: unless-stopped
