@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import json
 import sys
+import socket
 import logging
 from typing import Optional
 
@@ -24,6 +25,97 @@ from msmart.const import DeviceType
 
 logging.basicConfig(level=logging.WARNING)
 _LOGGER = logging.getLogger("midea-mcp")
+
+# ─── macOS UDP broadcast fix ──────────────────────────────────────────────
+# msmart-ng binds to 0.0.0.0 which fails on macOS (errno 49).
+# We wrap Discover.discover to create a pre-bound socket.
+
+_local_ip: Optional[str] = None
+
+
+def _get_local_ip() -> str:
+    global _local_ip
+    if _local_ip:
+        return _local_ip
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(0.1)
+        s.connect(("192.168.69.1", 1))
+        _local_ip = s.getsockname()[0]
+        s.close()
+        return _local_ip or "127.0.0.1"
+    except Exception:
+        return "127.0.0.1"
+
+
+# Patch Discover.discover to bind to LAN IP instead of 0.0.0.0
+import msmart.discover as _disc
+
+_orig_discover_classmethod = Discover.discover
+
+
+async def _patched_discover(
+    cls,
+    *,
+    target="255.255.255.255",
+    timeout=5,
+    discovery_packets=3,
+    interface=None,
+    region="",
+    account=None,
+    password=None,
+    auto_connect=True,
+    get_async_client=None,
+):
+    """Patched discover: creates a pre-bound socket to avoid macOS errno 49."""
+
+    # Initialize lock if needed (original behavior)
+    if cls._lock is None:
+        cls._lock = asyncio.Lock()
+
+    cls._cloud = None
+    cls._get_async_client = get_async_client
+    cls._region = region
+    cls._account = account
+    cls._password = password
+    cls._auto_connect = auto_connect
+
+    loop = asyncio.get_event_loop()
+    local_ip = _get_local_ip()
+
+    # Create pre-bound socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.setblocking(False)
+    try:
+        sock.bind((local_ip, 0))
+    except OSError:
+        _LOGGER.warning("Could not bind to %s, falling back to 0.0.0.0", local_ip)
+        sock.bind(("0.0.0.0", 0))
+
+    transport, protocol = await loop.create_datagram_endpoint(
+        lambda: _disc._DiscoverProtocol(
+            target=target,
+            discovery_packets=discovery_packets,
+            interface=interface,
+        ),
+        sock=sock,
+    )
+    protocol = _disc.cast(_disc._DiscoverProtocol, protocol)
+
+    try:
+        await asyncio.sleep(timeout)
+    finally:
+        transport.close()
+
+    # Gather discovered devices
+    devices = await asyncio.gather(*protocol.tasks) if protocol.tasks else []
+    devices = list(filter(None, devices))
+
+    return devices
+
+
+Discover.discover = classmethod(_patched_discover)
 
 # ─── MCP Server ───────────────────────────────────────────────────────────
 
@@ -44,7 +136,6 @@ async def _get_device(ip: Optional[str] = None) -> AirConditioner:
         return _device
 
     if ip:
-        # Connect to specific IP
         dev = await Discover.discover_single(ip, discovery_packets=2)
         if dev is None:
             raise Exception(f"无法在 {ip} 发现美的设备，请确认 IP 地址和网络连接。")
@@ -97,7 +188,6 @@ async def discover_devices() -> str:
         acs = [d for d in devices if isinstance(d, AirConditioner)]
 
         if not acs:
-            # Clear cached device
             global _device
             _device = None
             return "未在局域网发现美的空调设备。\n请确认：\n1. 空调已通电\n2. 空调已连接 WiFi\n3. 手机和空调在同一个网络"
@@ -116,7 +206,6 @@ async def discover_devices() -> str:
                 f"  风速: {fan_name}\n\n"
             )
 
-        # Cache the first one
         _device = acs[0]
         return result
 
@@ -157,7 +246,7 @@ async def get_status(ip: Optional[str] = None) -> str:
 
 @mcp.tool()
 async def set_power(state: bool, ip: Optional[str] = None) -> str:
-    """开关美旳空调。
+    """开关美的空调。
 
     Args:
         state: True=开机, False=关机
@@ -186,7 +275,6 @@ async def set_temperature(temperature: float, ip: Optional[str] = None) -> str:
             return f"温度超出范围（{ac.min_target_temperature}°C ~ {ac.max_target_temperature}°C）"
 
         ac.target_temperature = temperature
-        # Ensure power is on when setting temperature
         if not ac.power_state:
             ac.power_state = True
         await ac.apply()
@@ -196,10 +284,7 @@ async def set_temperature(temperature: float, ip: Optional[str] = None) -> str:
 
 
 @mcp.tool()
-async def set_mode(
-    mode: str,
-    ip: Optional[str] = None,
-) -> str:
+async def set_mode(mode: str, ip: Optional[str] = None) -> str:
     """设置美的空调运行模式。
 
     Args:
@@ -229,10 +314,7 @@ async def set_mode(
 
 
 @mcp.tool()
-async def set_fan_speed(
-    speed: str,
-    ip: Optional[str] = None,
-) -> str:
+async def set_fan_speed(speed: str, ip: Optional[str] = None) -> str:
     """设置美的空调风速。
 
     Args:
