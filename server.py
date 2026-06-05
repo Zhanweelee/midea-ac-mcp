@@ -40,7 +40,7 @@ def _get_local_ip() -> str:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(0.1)
-        s.connect(("192.168.69.1", 1))
+        s.connect(("8.8.8.8", 1))
         _local_ip = s.getsockname()[0]
         s.close()
         return _local_ip or "127.0.0.1"
@@ -122,6 +122,8 @@ Discover.discover = classmethod(_patched_discover)
 mcp = FastMCP(
     name="Midea AC Controller",
     instructions="控制美的（及同生态品牌）智能空调。支持扫描发现设备、查看状态、开关机、调温、调模式、调风速。",
+    host="0.0.0.0",
+    port=8000,
 )
 
 # Global: cached device reference
@@ -371,7 +373,7 @@ def main():
         return
 
     if args.transport == "streamable-http":
-        mcp.run(transport=args.transport, host=args.host, port=args.port)
+        mcp.run(transport="streamable-http")
     else:
         mcp.run(transport="stdio")
 
